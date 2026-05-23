@@ -1,6 +1,7 @@
 import zipfile
 import tarfile
 import py7zr
+import pyzipper
 import os
 import time
 import shutil
@@ -72,6 +73,7 @@ class ArchiveEntry:
             '.so': 'Shared Library',
             '.o': 'Object File',
             '.exe': 'Executable',
+            '.7z': '7Z Archive',
         }
         return type_map.get(ext, f'{ext.upper()} File') if ext else 'File'
 
@@ -88,12 +90,15 @@ def format_size(size: int) -> str:
 
 
 class ArchiveHandler:
-    def __init__(self):
+    def __init__(self, password: Optional[str] = None):
         self.path: Optional[str] = None
         self.entries: List[ArchiveEntry] = []
         self.type: Optional[str] = None
+        self.password: Optional[str] = password
 
-    def open(self, path: str) -> List[ArchiveEntry]:
+    def open(self, path: str, password: Optional[str] = None) -> List[ArchiveEntry]:
+        if password is not None:
+            self.password = password
         if not os.path.isfile(path):
             raise FileNotFoundError(f'File not found: {path}')
         self.path = path
@@ -124,20 +129,28 @@ class ArchiveHandler:
         return self.entries
 
     def _read_zip(self):
-        with zipfile.ZipFile(self.path, 'r') as zf:
+        if self.password:
+            zf = pyzipper.AESZipFile(self.path, 'r')
+            zf.setpassword(self.password.encode())
+        else:
+            zf = zipfile.ZipFile(self.path, 'r')
+        with zf:
             for info in zf.infolist():
                 dt = info.date_time
                 try:
                     mtime = time.mktime(dt + (0, 0, -1))
                 except (OverflowError, ValueError, OSError):
                     mtime = 0.0
+                crc_val = ''
+                if info.CRC != 0 or not self.password:
+                    crc_val = f'{info.CRC:08X}'
                 entry = ArchiveEntry(
                     name=info.filename,
                     size=info.file_size,
                     packed_size=info.compress_size,
                     modified=mtime,
                     is_dir=info.filename.endswith('/'),
-                    crc=f'{info.CRC:08X}',
+                    crc=crc_val,
                 )
                 self.entries.append(entry)
 
@@ -155,7 +168,10 @@ class ArchiveHandler:
                 self.entries.append(entry)
 
     def _read_7z(self):
-        with py7zr.SevenZipFile(self.path, 'r') as sz:
+        kwargs = {}
+        if self.password:
+            kwargs['password'] = self.password
+        with py7zr.SevenZipFile(self.path, 'r', **kwargs) as sz:
             for info in sz.list():
                 modified = 0.0
                 if info.creationtime:
@@ -172,27 +188,40 @@ class ArchiveHandler:
                 )
                 self.entries.append(entry)
 
-    def extract(self, members: List[str], dest_dir: str, progress_callback=None):
+    def extract(self, members: List[str], dest_dir: str, progress_callback=None,
+                password: Optional[str] = None):
         if not self.path:
             raise ValueError('No archive open')
+        if password is not None:
+            self.password = password
 
         os.makedirs(dest_dir, exist_ok=True)
         total = len(members)
         path_lower = self.path.lower()
 
         if path_lower.endswith('.zip'):
-            with zipfile.ZipFile(self.path, 'r') as zf:
+            if self.password:
+                zf = pyzipper.AESZipFile(self.path, 'r')
+                zf.setpassword(self.password.encode())
+            else:
+                zf = zipfile.ZipFile(self.path, 'r')
+            with zf:
                 for i, member in enumerate(members):
                     zf.extract(member, dest_dir)
                     if progress_callback:
                         progress_callback(i + 1, total, member)
         elif path_lower.endswith('.7z'):
-            with py7zr.SevenZipFile(self.path, 'r') as sz:
+            kwargs = {}
+            if self.password:
+                kwargs['password'] = self.password
+            with py7zr.SevenZipFile(self.path, 'r', **kwargs) as sz:
                 sz.extract(dest_dir, targets=members)
                 for i, member in enumerate(members):
                     if progress_callback:
                         progress_callback(i + 1, total, member)
         else:
+            if self.password:
+                raise ValueError('Password encryption is not supported for this archive format')
             mode = 'r:'
             if self.type == 'tar.gz':
                 mode = 'r:gz'
@@ -207,12 +236,23 @@ class ArchiveHandler:
                         progress_callback(i + 1, total, member)
 
     def create_archive(self, archive_path: str, file_paths: List[str],
-                       archive_type: str, progress_callback=None):
+                       archive_type: str, progress_callback=None,
+                       password: Optional[str] = None):
+        if password is not None:
+            self.password = password
+
         total = len(file_paths)
         base_dir = os.path.dirname(os.path.commonpath(file_paths)) if file_paths else ''
 
         if archive_type == 'zip':
-            with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            if self.password:
+                zf = pyzipper.AESZipFile(archive_path, 'w',
+                                         compression=zipfile.ZIP_DEFLATED,
+                                         encryption=pyzipper.WZ_AES)
+                zf.setpassword(self.password.encode())
+            else:
+                zf = zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED)
+            with zf:
                 for i, fp in enumerate(file_paths):
                     if os.path.isfile(fp):
                         arcname = os.path.basename(fp)
@@ -226,7 +266,10 @@ class ArchiveHandler:
                     if progress_callback:
                         progress_callback(i + 1, total, fp)
         elif archive_type == '7z':
-            with py7zr.SevenZipFile(archive_path, 'w') as sz:
+            kwargs = {}
+            if self.password:
+                kwargs['password'] = self.password
+            with py7zr.SevenZipFile(archive_path, 'w', **kwargs) as sz:
                 for i, fp in enumerate(file_paths):
                     if os.path.isfile(fp):
                         sz.write(fp, os.path.basename(fp))
@@ -235,6 +278,8 @@ class ArchiveHandler:
                     if progress_callback:
                         progress_callback(i + 1, total, fp)
         elif archive_type in ('tar', 'tar.gz', 'tar.bz2', 'tar.xz'):
+            if self.password:
+                raise ValueError('Password encryption is not supported for this archive format')
             mode_map = {
                 'tar': 'w',
                 'tar.gz': 'w:gz',
@@ -251,9 +296,11 @@ class ArchiveHandler:
                     if progress_callback:
                         progress_callback(i + 1, total, fp)
 
-    def delete_members(self, members: List[str]):
+    def delete_members(self, members: List[str], password: Optional[str] = None):
         if not self.path:
             raise ValueError('No archive open')
+        if password is not None:
+            self.password = password
 
         temp_fd, temp_path = tempfile.mkstemp(suffix=f'_{os.path.basename(self.path)}')
         os.close(temp_fd)
@@ -261,22 +308,37 @@ class ArchiveHandler:
         try:
             path_lower = self.path.lower()
             if path_lower.endswith('.zip'):
-                with zipfile.ZipFile(self.path, 'r') as src:
-                    with zipfile.ZipFile(temp_path, 'w', zipfile.ZIP_DEFLATED) as dst:
-                        for info in src.infolist():
-                            if info.filename not in members:
-                                dst.writestr(info, src.read(info.filename))
+                if self.password:
+                    src = pyzipper.AESZipFile(self.path, 'r')
+                    src.setpassword(self.password.encode())
+                    dst = pyzipper.AESZipFile(temp_path, 'w',
+                                              compression=zipfile.ZIP_DEFLATED,
+                                              encryption=pyzipper.WZ_AES)
+                    dst.setpassword(self.password.encode())
+                else:
+                    src = zipfile.ZipFile(self.path, 'r')
+                    dst = zipfile.ZipFile(temp_path, 'w', zipfile.ZIP_DEFLATED)
+                with src, dst:
+                    for info in src.infolist():
+                        if info.filename not in members:
+                            dst.writestr(info, src.read(info.filename))
             elif path_lower.endswith('.7z'):
                 extract_tmp = tempfile.mkdtemp(suffix='_7z_delete')
                 try:
-                    with py7zr.SevenZipFile(self.path, 'r') as src:
+                    kwargs = {}
+                    if self.password:
+                        kwargs['password'] = self.password
+                    with py7zr.SevenZipFile(self.path, 'r', **kwargs) as src:
                         keep = [n for n in src.getnames() if n not in members]
                         if keep:
                             src.extract(path=extract_tmp, targets=keep)
                     for root, _dirs, files in os.walk(extract_tmp):
                         for fn in files:
                             os.chmod(os.path.join(root, fn), 0o644)
-                    with py7zr.SevenZipFile(temp_path, 'w') as dst:
+                    kwargs_w = {}
+                    if self.password:
+                        kwargs_w['password'] = self.password
+                    with py7zr.SevenZipFile(temp_path, 'w', **kwargs_w) as dst:
                         for root, _dirs, files in os.walk(extract_tmp):
                             for fn in files:
                                 full = os.path.join(root, fn)
@@ -285,6 +347,8 @@ class ArchiveHandler:
                 finally:
                     shutil.rmtree(extract_tmp, ignore_errors=True)
             else:
+                if self.password:
+                    raise ValueError('Password encryption is not supported for this archive format')
                 mode = 'r:'
                 wmode = 'w:'
                 if self.type == 'tar.gz':

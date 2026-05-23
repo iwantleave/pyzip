@@ -514,5 +514,144 @@ class TestArchiveHandlerEdgeCases(unittest.TestCase):
             shutil.rmtree(tmpdir)
 
 
+import py7zr
+import pyzipper
+
+
+class TestPasswordEncryption(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def _create_zip_files(self):
+        src = os.path.join(self.tmpdir, 'src')
+        os.makedirs(src)
+        for f in ['a.txt', 'b.txt']:
+            with open(os.path.join(src, f), 'w') as fh:
+                fh.write(f'content of {f}')
+        return [os.path.join(src, n) for n in ['a.txt', 'b.txt']]
+
+    def test_create_encrypted_zip(self):
+        out = os.path.join(self.tmpdir, 'secret.zip')
+        files = self._create_zip_files()
+        ArchiveHandler().create_archive(out, files, 'zip', password='secret')
+        self.assertTrue(os.path.isfile(out))
+        with pyzipper.AESZipFile(out, 'r') as zf:
+            zf.setpassword(b'secret')
+            self.assertIn('a.txt', zf.namelist())
+
+    def test_open_encrypted_zip_correct_password(self):
+        out = os.path.join(self.tmpdir, 'secret.zip')
+        files = self._create_zip_files()
+        ArchiveHandler().create_archive(out, files, 'zip', password='secret')
+        h = ArchiveHandler(password='secret')
+        entries = h.open(out)
+        names = [e.name for e in entries]
+        self.assertIn('a.txt', names)
+        self.assertIn('b.txt', names)
+
+    def test_open_encrypted_zip_wrong_password(self):
+        out = os.path.join(self.tmpdir, 'secret.zip')
+        files = self._create_zip_files()
+        ArchiveHandler().create_archive(out, files, 'zip', password='secret')
+        h = ArchiveHandler(password='wrong')
+        entries = h.open(out)
+        self.assertEqual(len(entries), 2)
+
+    def test_open_encrypted_zip_no_password(self):
+        out = os.path.join(self.tmpdir, 'secret.zip')
+        files = self._create_zip_files()
+        ArchiveHandler().create_archive(out, files, 'zip', password='secret')
+        h = ArchiveHandler()
+        entries = h.open(out)
+        self.assertEqual(len(entries), 2)
+
+    def test_extract_encrypted_zip(self):
+        out = os.path.join(self.tmpdir, 'secret.zip')
+        files = self._create_zip_files()
+        ArchiveHandler().create_archive(out, files, 'zip', password='secret')
+        h = ArchiveHandler(password='secret')
+        h.open(out)
+        dest = os.path.join(self.tmpdir, 'out')
+        h.extract(['a.txt'], dest, password='secret')
+        self.assertTrue(os.path.isfile(os.path.join(dest, 'a.txt')))
+
+    def test_delete_from_encrypted_zip(self):
+        out = os.path.join(self.tmpdir, 'secret.zip')
+        files = self._create_zip_files()
+        ArchiveHandler().create_archive(out, files, 'zip', password='secret')
+        h = ArchiveHandler(password='secret')
+        h.open(out)
+        h.delete_members(['a.txt'], password='secret')
+        names = [e.name for e in h.entries]
+        self.assertNotIn('a.txt', names)
+        self.assertIn('b.txt', names)
+
+    def test_create_encrypted_7z(self):
+        out = os.path.join(self.tmpdir, 'secret.7z')
+        files = self._create_zip_files()
+        ArchiveHandler().create_archive(out, files, '7z', password='secret')
+        self.assertTrue(os.path.isfile(out))
+        with py7zr.SevenZipFile(out, 'r', password='secret') as sz:
+            names = [info.filename for info in sz.list()]
+            self.assertIn('a.txt', names)
+
+    def test_open_encrypted_7z_correct_password(self):
+        out = os.path.join(self.tmpdir, 'secret.7z')
+        files = self._create_zip_files()
+        ArchiveHandler().create_archive(out, files, '7z', password='secret')
+        h = ArchiveHandler(password='secret')
+        entries = h.open(out)
+        names = [e.name for e in entries]
+        self.assertIn('a.txt', names)
+
+    def test_open_encrypted_7z_wrong_password(self):
+        out = os.path.join(self.tmpdir, 'secret.7z')
+        files = self._create_zip_files()
+        ArchiveHandler().create_archive(out, files, '7z', password='secret')
+        h = ArchiveHandler(password='wrong')
+        entries = h.open(out)
+        self.assertEqual(len(entries), 2)
+        dest = os.path.join(self.tmpdir, 'out')
+        with self.assertRaises(Exception):
+            h.extract(['a.txt'], dest, password='wrong')
+
+    def test_extract_encrypted_7z(self):
+        out = os.path.join(self.tmpdir, 'secret.7z')
+        files = self._create_zip_files()
+        ArchiveHandler().create_archive(out, files, '7z', password='secret')
+        h = ArchiveHandler(password='secret')
+        h.open(out)
+        dest = os.path.join(self.tmpdir, 'out')
+        h.extract(['a.txt'], dest, password='secret')
+        self.assertTrue(os.path.isfile(os.path.join(dest, 'a.txt')))
+
+    def test_password_via_open_method(self):
+        out = os.path.join(self.tmpdir, 'secret.zip')
+        files = self._create_zip_files()
+        ArchiveHandler().create_archive(out, files, 'zip', password='secret')
+        h = ArchiveHandler()
+        entries = h.open(out, password='secret')
+        self.assertEqual(len(entries), 2)
+
+    def test_tar_with_password_raises(self):
+        src = os.path.join(self.tmpdir, 'f.txt')
+        with open(src, 'w') as f:
+            f.write('data')
+        h = ArchiveHandler(password='secret')
+        with self.assertRaises(ValueError):
+            h.create_archive(os.path.join(self.tmpdir, 'out.tar'), [src], 'tar', password='secret')
+
+    def test_no_password_on_plain_zip_still_works(self):
+        out = os.path.join(self.tmpdir, 'plain.zip')
+        files = self._create_zip_files()
+        ArchiveHandler().create_archive(out, files, 'zip')
+        h = ArchiveHandler()
+        entries = h.open(out)
+        self.assertEqual(len(entries), 2)
+
+
 if __name__ == '__main__':
     unittest.main()

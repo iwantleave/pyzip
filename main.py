@@ -11,6 +11,7 @@ gi.require_version('Gdk', '4.0')
 gi.require_version('Pango', '1.0')
 from gi.repository import Gtk, Gio, GLib, Gdk, Pango, GObject
 
+import py7zr
 from archive_handler import ArchiveHandler, ArchiveEntry, format_size
 
 
@@ -114,10 +115,41 @@ def is_archive(path: str) -> bool:
     return any(p.endswith(ext) for ext in ARCHIVE_EXTENSIONS)
 
 
+class PasswordDialog(Gtk.Dialog):
+    def __init__(self, parent: Gtk.Window, title='Enter Password', current_password=''):
+        super().__init__(title=title, transient_for=parent, modal=True)
+        self.set_default_size(350, 150)
+        self._result = None
+
+        area = self.get_content_area()
+        area.set_spacing(8)
+        area.set_margin_start(12)
+        area.set_margin_end(12)
+        area.set_margin_top(12)
+        area.set_margin_bottom(12)
+
+        self.password_entry = Gtk.PasswordEntry()
+        self.password_entry.set_placeholder_text('Enter password')
+        self.password_entry.set_text(current_password)
+        self.password_entry.set_hexpand(True)
+        area.append(self.password_entry)
+
+        self.add_button('Cancel', Gtk.ResponseType.CANCEL)
+        self.add_button('OK', Gtk.ResponseType.OK)
+
+    def get_password(self) -> Optional[str]:
+        if self._result == Gtk.ResponseType.OK:
+            return self.password_entry.get_text()
+        return None
+
+    def do_response(self, response):
+        self._result = response
+
+
 class ExtractDialog(Gtk.Dialog):
-    def __init__(self, parent: Gtk.Window, archive_name: str):
+    def __init__(self, parent: Gtk.Window, archive_name: str, current_password=''):
         super().__init__(title=f'Extract - {archive_name}', transient_for=parent, modal=True)
-        self.set_default_size(450, 200)
+        self.set_default_size(450, 250)
         self._result = None
 
         area = self.get_content_area()
@@ -142,7 +174,12 @@ class ExtractDialog(Gtk.Dialog):
         self.overwrite_check.set_active(True)
         area.append(self.overwrite_check)
 
-        area.append(Gtk.Label())
+        area.append(self._make_label('Password (if encrypted):'))
+        self.password_entry = Gtk.PasswordEntry()
+        self.password_entry.set_text(current_password)
+        self.password_entry.set_placeholder_text('Leave blank if not encrypted')
+        area.append(self.password_entry)
+
         self.add_button('Cancel', Gtk.ResponseType.CANCEL)
         self.add_button('Extract', Gtk.ResponseType.OK)
 
@@ -163,16 +200,18 @@ class ExtractDialog(Gtk.Dialog):
         dialog.select_folder(parent, None, on_open)
 
     def get_result(self):
-        return self.dir_entry.get_text().strip() if self._result == Gtk.ResponseType.OK else None
+        if self._result == Gtk.ResponseType.OK:
+            return self.dir_entry.get_text().strip(), self.password_entry.get_text()
+        return None, None
 
     def do_response(self, response):
         self._result = response
 
 
 class AddDialog(Gtk.Dialog):
-    def __init__(self, parent: Gtk.Window, current_dir: str):
+    def __init__(self, parent: Gtk.Window, current_dir: str, current_password=''):
         super().__init__(title='Add to Archive', transient_for=parent, modal=True)
-        self.set_default_size(500, 400)
+        self.set_default_size(500, 450)
         self._result = None
 
         area = self.get_content_area()
@@ -192,6 +231,12 @@ class AddDialog(Gtk.Dialog):
         self.format_combo.set_selected(0)
         area.append(self.format_combo)
 
+        area.append(self._make_label('Password (optional):'))
+        self.password_entry = Gtk.PasswordEntry()
+        self.password_entry.set_text(current_password)
+        self.password_entry.set_placeholder_text('Leave blank for no encryption')
+        area.append(self.password_entry)
+
         area.append(self._make_label('Files to add:'))
         self.file_store = Gtk.ListStore.new([GObject.TYPE_STRING, GObject.TYPE_STRING])
         self.file_view = Gtk.TreeView(model=self.file_store)
@@ -202,7 +247,7 @@ class AddDialog(Gtk.Dialog):
 
         sw = Gtk.ScrolledWindow()
         sw.set_child(self.file_view)
-        sw.set_min_content_height(150)
+        sw.set_min_content_height(120)
         area.append(sw)
 
         btn_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -260,7 +305,8 @@ class AddDialog(Gtk.Dialog):
             name = self.name_entry.get_text().strip()
             fmt = {0: 'zip', 1: 'tar', 2: 'tar.gz', 3: '7z'}[self.format_combo.get_selected()]
             files = [row[0] for row in self.file_store]
-            return name, fmt, files
+            pwd = self.password_entry.get_text()
+            return name, fmt, files, pwd
         return None
 
     def do_response(self, response):
@@ -316,6 +362,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.current_path: str = os.path.expanduser('~')
         self.mode: int = 0  # 0=FS, 1=Archive
         self.archive_internal_path: str = ''
+        self.current_password: Optional[str] = None
 
         self._setup_css()
         self._setup_ui()
@@ -347,6 +394,18 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_not_implemented(self, action=None, param=None):
         self._show_message('This feature is not yet implemented.')
 
+    def _on_password_menu(self, action=None, param=None):
+        dialog = PasswordDialog(self, 'Set Password', self.current_password or '')
+        def on_response(dlg, response):
+            pwd = dlg.get_password()
+            dlg.destroy()
+            if pwd is not None:
+                self.current_password = pwd
+                self.archive_handler.password = pwd
+                self._update_status(f'Password {"set" if pwd else "cleared"}.')
+        dialog.connect('response', on_response)
+        dialog.show()
+
     def _on_close_archive(self, action=None, param=None):
         if self.mode == 1:
             parent = os.path.dirname(self.current_path)
@@ -358,7 +417,7 @@ class MainWindow(Gtk.ApplicationWindow):
         action_defs = [
             ('open', self._on_open_archive),
             ('close', self._on_close_archive),
-            ('password', self._on_not_implemented),
+            ('password', self._on_password_menu),
             ('set_default', self._on_not_implemented),
             ('add', self._on_add),
             ('extract', self._on_extract),
@@ -736,7 +795,7 @@ class MainWindow(Gtk.ApplicationWindow):
             f'Total size: {format_size(total_size)}'
         )
 
-    def _load_archive(self, path: str):
+    def _load_archive(self, path: str, password: Optional[str] = None):
         self.mode = 1
         self.archive_internal_path = ''
         self._clear_model()
@@ -744,12 +803,34 @@ class MainWindow(Gtk.ApplicationWindow):
         self.address_entry.set_text(self.current_path)
         self.set_title(f'PyZip - {os.path.basename(path)}')
 
-        try:
-            entries = self.archive_handler.open(path)
-        except Exception as e:
-            self._update_status(f'Error opening archive: {e}')
-            self.mode = 0
-            self._load_directory(os.path.dirname(path))
+        def try_open(pwd):
+            try:
+                return self.archive_handler.open(path, password=pwd)
+            except py7zr.exceptions.PasswordRequired:
+                return None
+            except RuntimeError as e:
+                if 'password' in str(e).lower() or 'Bad password' in str(e):
+                    return None
+                raise
+            except Exception as e:
+                raise
+
+        pwd = password if password is not None else self.current_password
+        entries = try_open(pwd)
+        if entries is None:
+            dialog = PasswordDialog(self, f'Password required for {os.path.basename(path)}', pwd or '')
+            def on_pwd_response(dlg, response):
+                p = dlg.get_password()
+                dlg.destroy()
+                if p is not None:
+                    self.current_password = p
+                    self.archive_handler.password = p
+                    self._load_archive(path, password=p)
+                else:
+                    self.mode = 0
+                    self._load_directory(os.path.dirname(path))
+            dialog.connect('response', on_pwd_response)
+            dialog.show()
             return
 
         file_count = 0
@@ -910,7 +991,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self._show_message('Select files to extract.')
             return
 
-        dialog = ExtractDialog(self, os.path.basename(self.current_path))
+        dialog = ExtractDialog(self, os.path.basename(self.current_path), self.current_password or '')
         dialog.connect('response', self._on_extract_response, selected)
         dialog.show()
 
@@ -918,7 +999,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if self.mode == 1:
             dest = os.path.dirname(self.current_path)
             members = [e.name for e in self.archive_handler.entries]
-            self._do_extract(members, dest)
+            self._do_extract(members, dest, self.current_password)
             self._load_directory(dest)
         else:
             selected = self._get_selected_paths()
@@ -929,18 +1010,18 @@ class MainWindow(Gtk.ApplicationWindow):
             dest = os.path.dirname(path)
             try:
                 ah = ArchiveHandler()
-                entries = ah.open(path)
-                self._do_extract_static(ah, [e.name for e in entries], dest)
+                entries = ah.open(path, password=self.current_password)
+                self._do_extract_static(ah, [e.name for e in entries], dest, self.current_password)
                 self._load_directory(dest)
             except Exception as e:
                 traceback.print_exc()
                 self._show_message(f'Extraction error: {e}')
 
-    def _do_extract_static(self, handler, members, dest):
+    def _do_extract_static(self, handler, members, dest, password=None):
         dialog = ProgressDialog(self, 'Extracting...')
         dialog.present()
         try:
-            handler.extract(members, dest, dialog.update)
+            handler.extract(members, dest, dialog.update, password=password)
             self._update_status(f'Extracted {len(members)} files to {dest}')
         except Exception as e:
             traceback.print_exc()
@@ -951,18 +1032,19 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _on_extract_response(self, dialog, response, selected):
         if response == Gtk.ResponseType.OK:
-            dest = dialog.get_result()
+            dest, pwd = dialog.get_result()
             dialog.destroy()
             if dest:
-                self._do_extract(selected, dest)
+                self.current_password = pwd
+                self._do_extract(selected, dest, pwd)
         else:
             dialog.destroy()
 
-    def _do_extract(self, members, dest):
+    def _do_extract(self, members, dest, password=None):
         dialog = ProgressDialog(self, 'Extracting...')
         dialog.present()
         try:
-            self.archive_handler.extract(members, dest, dialog.update)
+            self.archive_handler.extract(members, dest, dialog.update, password=password)
             self._update_status(f'Extracted {len(members)} files to {dest}')
         except Exception as e:
             traceback.print_exc()
@@ -972,7 +1054,8 @@ class MainWindow(Gtk.ApplicationWindow):
             dialog.destroy()
 
     def _on_add(self, btn=None):
-        d = AddDialog(self, self.current_path if self.mode == 0 else os.path.dirname(self.current_path))
+        cur_dir = self.current_path if self.mode == 0 else os.path.dirname(self.current_path)
+        d = AddDialog(self, cur_dir, self.current_password or '')
         if self.mode == 1:
             d.name_entry.set_text(self.current_path)
         d.connect('response', self._on_add_response)
@@ -983,17 +1066,21 @@ class MainWindow(Gtk.ApplicationWindow):
             result = dialog.get_result()
             dialog.destroy()
             if result:
-                name, fmt, files = result
+                name, fmt, files, pwd = result
+                if not name:
+                    self._show_message('Archive name cannot be empty.')
+                    return
                 if files:
-                    self._do_create(name, fmt, files)
+                    self.current_password = pwd
+                    self._do_create(name, fmt, files, pwd)
         else:
             dialog.destroy()
 
-    def _do_create(self, archive_path, fmt, files):
+    def _do_create(self, archive_path, fmt, files, password=None):
         dialog = ProgressDialog(self, 'Creating archive...')
         dialog.present()
         try:
-            self.archive_handler.create_archive(archive_path, files, fmt, dialog.update)
+            self.archive_handler.create_archive(archive_path, files, fmt, dialog.update, password=password)
             self._update_status(f'Created: {archive_path}')
             if self.mode == 0:
                 self._load_directory(self.current_path)
@@ -1031,8 +1118,8 @@ class MainWindow(Gtk.ApplicationWindow):
             self._update_status('Deleting...')
             while GLib.MainContext.default().iteration(False):
                 pass
-            self.archive_handler.delete_members(selected)
-            self._load_archive(self.current_path)
+            self.archive_handler.delete_members(selected, password=self.current_password)
+            self._load_archive(self.current_path, password=self.current_password)
             self._update_status(f'Deleted {len(selected)} file(s)')
         except Exception as e:
             self._show_message(f'Delete error: {e}')
@@ -1049,7 +1136,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 if os.path.isfile(selected[0]) and is_archive(selected[0]):
                     try:
                         ah = ArchiveHandler()
-                        entries = ah.open(selected[0])
+                        entries = ah.open(selected[0], password=self.current_password)
                         d = InfoDialog(self, selected[0], entries)
                         d.connect('response', lambda dlg, r: dlg.destroy())
                         d.show()
