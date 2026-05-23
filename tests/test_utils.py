@@ -39,6 +39,10 @@ class TestIsArchive(unittest.TestCase):
         self.assertTrue(is_archive('test.tar.xz'))
         self.assertTrue(is_archive('test.txz'))
 
+    def test_7z(self):
+        self.assertTrue(is_archive('test.7z'))
+        self.assertTrue(is_archive('test.7Z'))
+
     def test_non_archive(self):
         self.assertFalse(is_archive('test.txt'))
         self.assertFalse(is_archive('test.py'))

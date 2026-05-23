@@ -1,5 +1,6 @@
 import zipfile
 import tarfile
+import py7zr
 import os
 import time
 import shutil
@@ -114,6 +115,9 @@ class ArchiveHandler:
         elif path_lower.endswith('.tar'):
             self.type = 'tar'
             self._read_tar('r:')
+        elif path_lower.endswith('.7z'):
+            self.type = '7z'
+            self._read_7z()
         else:
             raise ValueError(f'Unsupported archive format: {path}')
 
@@ -150,6 +154,24 @@ class ArchiveHandler:
                 )
                 self.entries.append(entry)
 
+    def _read_7z(self):
+        with py7zr.SevenZipFile(self.path, 'r') as sz:
+            for info in sz.list():
+                modified = 0.0
+                if info.creationtime:
+                    modified = info.creationtime.timestamp()
+                crc_str = f'{info.crc32:08X}' if info.crc32 is not None else ''
+                packed = info.compressed if info.compressed is not None else 0
+                entry = ArchiveEntry(
+                    name=info.filename,
+                    size=info.uncompressed,
+                    packed_size=packed,
+                    modified=modified,
+                    is_dir=info.is_directory,
+                    crc=crc_str,
+                )
+                self.entries.append(entry)
+
     def extract(self, members: List[str], dest_dir: str, progress_callback=None):
         if not self.path:
             raise ValueError('No archive open')
@@ -162,6 +184,12 @@ class ArchiveHandler:
             with zipfile.ZipFile(self.path, 'r') as zf:
                 for i, member in enumerate(members):
                     zf.extract(member, dest_dir)
+                    if progress_callback:
+                        progress_callback(i + 1, total, member)
+        elif path_lower.endswith('.7z'):
+            with py7zr.SevenZipFile(self.path, 'r') as sz:
+                sz.extract(dest_dir, targets=members)
+                for i, member in enumerate(members):
                     if progress_callback:
                         progress_callback(i + 1, total, member)
         else:
@@ -197,6 +225,15 @@ class ArchiveHandler:
                                 zf.write(full, arcname)
                     if progress_callback:
                         progress_callback(i + 1, total, fp)
+        elif archive_type == '7z':
+            with py7zr.SevenZipFile(archive_path, 'w') as sz:
+                for i, fp in enumerate(file_paths):
+                    if os.path.isfile(fp):
+                        sz.write(fp, os.path.basename(fp))
+                    elif os.path.isdir(fp):
+                        sz.write(fp, os.path.basename(fp))
+                    if progress_callback:
+                        progress_callback(i + 1, total, fp)
         elif archive_type in ('tar', 'tar.gz', 'tar.bz2', 'tar.xz'):
             mode_map = {
                 'tar': 'w',
@@ -229,6 +266,24 @@ class ArchiveHandler:
                         for info in src.infolist():
                             if info.filename not in members:
                                 dst.writestr(info, src.read(info.filename))
+            elif path_lower.endswith('.7z'):
+                extract_tmp = tempfile.mkdtemp(suffix='_7z_delete')
+                try:
+                    with py7zr.SevenZipFile(self.path, 'r') as src:
+                        keep = [n for n in src.getnames() if n not in members]
+                        if keep:
+                            src.extract(path=extract_tmp, targets=keep)
+                    for root, _dirs, files in os.walk(extract_tmp):
+                        for fn in files:
+                            os.chmod(os.path.join(root, fn), 0o644)
+                    with py7zr.SevenZipFile(temp_path, 'w') as dst:
+                        for root, _dirs, files in os.walk(extract_tmp):
+                            for fn in files:
+                                full = os.path.join(root, fn)
+                                arcname = os.path.relpath(full, extract_tmp)
+                                dst.write(full, arcname)
+                finally:
+                    shutil.rmtree(extract_tmp, ignore_errors=True)
             else:
                 mode = 'r:'
                 wmode = 'w:'

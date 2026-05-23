@@ -116,6 +116,23 @@ class TestArchiveHandlerOpen(unittest.TestCase):
             tf.addfile(tarfile.TarInfo('file1.txt'), io.BytesIO(b'hello'))
         return path
 
+    def _create_7z(self, name='test.7z'):
+        path = os.path.join(self.tmpdir, name)
+        with py7zr.SevenZipFile(path, 'w') as sz:
+            sz.writef(io.BytesIO(b'hello world'), 'file1.txt')
+            sz.writef(io.BytesIO(b'foo bar baz'), 'file2.txt')
+        return path
+
+    def test_open_7z(self):
+        path = self._create_7z()
+        entries = self.handler.open(path)
+        self.assertEqual(self.handler.type, '7z')
+        self.assertEqual(len(entries), 2)
+        names = {e.name for e in entries}
+        self.assertIn('file1.txt', names)
+        self.assertIn('file2.txt', names)
+        self.assertEqual(entries[0].crc, '0D4A1185')
+
     def test_open_zip(self):
         path = self._create_zip()
         entries = self.handler.open(path)
@@ -162,6 +179,7 @@ class TestArchiveHandlerOpen(unittest.TestCase):
 
 import zipfile
 import tarfile
+import py7zr
 import io
 
 
@@ -217,6 +235,15 @@ class TestArchiveHandlerExtract(unittest.TestCase):
         dest = os.path.join(self.tmpdir, 'out')
         self.handler.extract(['f.txt'], dest)
         self.assertTrue(os.path.isfile(os.path.join(dest, 'f.txt')))
+
+    def test_extract_from_7z(self):
+        path = os.path.join(self.tmpdir, 'test.7z')
+        with py7zr.SevenZipFile(path, 'w') as sz:
+            sz.writef(io.BytesIO(b'content1'), 'file1.txt')
+        self.handler.open(path)
+        dest = os.path.join(self.tmpdir, 'out')
+        self.handler.extract(['file1.txt'], dest)
+        self.assertTrue(os.path.isfile(os.path.join(dest, 'file1.txt')))
 
 
 class TestExtractHere(unittest.TestCase):
@@ -329,6 +356,15 @@ class TestArchiveHandlerCreateArchive(unittest.TestCase):
             names = tf.getnames()
             self.assertIn('a.txt', names)
 
+    def test_create_7z(self):
+        out = os.path.join(self.tmpdir, 'out.7z')
+        self.handler.create_archive(out, self._file_paths('a.txt', 'b.txt'), '7z')
+        self.assertTrue(os.path.isfile(out))
+        with py7zr.SevenZipFile(out, 'r') as sz:
+            names = [info.filename for info in sz.list()]
+            self.assertIn('a.txt', names)
+            self.assertIn('b.txt', names)
+
     def test_create_with_folder(self):
         out = os.path.join(self.tmpdir, 'out.zip')
         self.handler.create_archive(out, [self.src_dir], 'zip')
@@ -369,6 +405,25 @@ class TestArchiveHandlerDelete(unittest.TestCase):
             zf.writestr('keep.txt', b'keep')
             zf.writestr('remove.txt', b'remove')
         return path
+
+    def _create_7z(self, name='test.7z'):
+        path = os.path.join(self.tmpdir, name)
+        with py7zr.SevenZipFile(path, 'w') as sz:
+            sz.writef(io.BytesIO(b'keep'), 'keep.txt')
+            sz.writef(io.BytesIO(b'remove'), 'remove.txt')
+        return path
+
+    def test_delete_from_7z(self):
+        path = self._create_7z()
+        self.handler.open(path)
+        self.handler.delete_members(['remove.txt'])
+        names = [e.name for e in self.handler.entries]
+        self.assertIn('keep.txt', names)
+        self.assertNotIn('remove.txt', names)
+        with py7zr.SevenZipFile(path, 'r') as sz:
+            filenames = [info.filename for info in sz.list()]
+            self.assertIn('keep.txt', filenames)
+            self.assertNotIn('remove.txt', filenames)
 
     def test_delete_from_zip(self):
         path = self._create_zip()

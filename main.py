@@ -62,7 +62,7 @@ class FileItem(GObject.Object):
     modified_raw = GObject.Property(type=float, default=0.0)
 
 
-ARCHIVE_EXTENSIONS = {'.zip', '.tar', '.tar.gz', '.tgz', '.tar.bz2', '.tbz2', '.tar.xz', '.txz'}
+ARCHIVE_EXTENSIONS = {'.zip', '.tar', '.tar.gz', '.tgz', '.tar.bz2', '.tbz2', '.tar.xz', '.txz', '.7z'}
 
 
 def get_file_type(name: str) -> str:
@@ -81,6 +81,7 @@ def get_file_type(name: str) -> str:
         '.xls': 'Excel Spreadsheet', '.xlsx': 'Excel Spreadsheet',
         '.zip': 'ZIP Archive', '.tar': 'TAR Archive',
         '.gz': 'GZip Archive', '.bz2': 'BZip2 Archive', '.xz': 'XZ Archive',
+        '.7z': '7Z Archive',
     }
     return m.get(ext, f'{ext.upper()} File') if ext else 'File'
 
@@ -103,7 +104,7 @@ def get_icon_for_file(name: str, ext: str) -> str:
         '.xls': 'x-office-spreadsheet-symbolic', '.xlsx': 'x-office-spreadsheet-symbolic',
         '.zip': 'application-x-archive-symbolic', '.tar': 'application-x-archive-symbolic',
         '.gz': 'application-x-archive-symbolic', '.bz2': 'application-x-archive-symbolic',
-        '.xz': 'application-x-archive-symbolic',
+        '.xz': 'application-x-archive-symbolic', '.7z': 'application-x-archive-symbolic',
     }
     return m.get(ext, 'text-x-generic-symbolic')
 
@@ -187,7 +188,7 @@ class AddDialog(Gtk.Dialog):
         area.append(self.name_entry)
 
         area.append(self._make_label('Archive format:'))
-        self.format_combo = Gtk.DropDown(model=Gtk.StringList.new(['ZIP', 'TAR', 'TAR.GZ']))
+        self.format_combo = Gtk.DropDown(model=Gtk.StringList.new(['ZIP', 'TAR', 'TAR.GZ', '7Z']))
         self.format_combo.set_selected(0)
         area.append(self.format_combo)
 
@@ -257,7 +258,7 @@ class AddDialog(Gtk.Dialog):
     def get_result(self):
         if self._result == Gtk.ResponseType.OK:
             name = self.name_entry.get_text().strip()
-            fmt = {0: 'zip', 1: 'tar', 2: 'tar.gz'}[self.format_combo.get_selected()]
+            fmt = {0: 'zip', 1: 'tar', 2: 'tar.gz', 3: '7z'}[self.format_combo.get_selected()]
             files = [row[0] for row in self.file_store]
             return name, fmt, files
         return None
@@ -336,10 +337,113 @@ class MainWindow(Gtk.ApplicationWindow):
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.set_child(vbox)
         self._setup_headerbar()
+        self._register_menu_actions()
+        self._setup_menu_bar(vbox)
         self._setup_toolbar(vbox)
         self._setup_address_bar(vbox)
         self._setup_file_list(vbox)
         self._setup_status_bar(vbox)
+
+    def _on_not_implemented(self, action=None, param=None):
+        self._show_message('This feature is not yet implemented.')
+
+    def _on_close_archive(self, action=None, param=None):
+        if self.mode == 1:
+            parent = os.path.dirname(self.current_path)
+            self.archive_handler = ArchiveHandler()
+            self.mode = 0
+            self._load_directory(parent)
+
+    def _register_menu_actions(self):
+        action_defs = [
+            ('open', self._on_open_archive),
+            ('close', self._on_close_archive),
+            ('password', self._on_not_implemented),
+            ('set_default', self._on_not_implemented),
+            ('add', self._on_add),
+            ('extract', self._on_extract),
+            ('extract_here', self._on_extract_here),
+            ('test', self._on_not_implemented),
+            ('view', self._on_not_implemented),
+            ('delete', self._on_delete),
+            ('find', self._on_not_implemented),
+            ('info', self._on_info),
+            ('repair', self._on_not_implemented),
+            ('convert', self._on_not_implemented),
+            ('benchmark', self._on_not_implemented),
+            ('settings', self._on_not_implemented),
+            ('add_fav', self._on_not_implemented),
+            ('org_fav', self._on_not_implemented),
+            ('help_topics', self._on_not_implemented),
+            ('about', self._on_not_implemented),
+        ]
+        for name, cb in action_defs:
+            action = Gio.SimpleAction.new(name, None)
+            action.connect('activate', lambda a, p, cb=cb: cb())
+            self.add_action(action)
+
+    def _setup_menu_bar(self, parent):
+        def sub(*items):
+            m = Gio.Menu()
+            for item in items:
+                if item is None:
+                    m.append_section(None, Gio.Menu())
+                elif isinstance(item, tuple):
+                    m.append(*item)
+            return m
+
+        menu_bar = Gio.Menu()
+
+        menu_bar.append_submenu('File', sub(
+            ('Open Archive…', 'win.open'),
+            ('Close Archive', 'win.close'),
+            None,
+            ('Password…', 'win.password'),
+            None,
+            ('Set Default…', 'win.set_default'),
+            None,
+            ('Exit', 'app.quit'),
+        ))
+
+        menu_bar.append_submenu('Commands', sub(
+            ('Add…', 'win.add'),
+            ('Extract…', 'win.extract'),
+            ('Extract Here', 'win.extract_here'),
+            None,
+            ('Test', 'win.test'),
+            ('View…', 'win.view'),
+            ('Delete', 'win.delete'),
+            ('Find…', 'win.find'),
+            ('Info', 'win.info'),
+            None,
+            ('Repair…', 'win.repair'),
+        ))
+
+        menu_bar.append_submenu('Tools', sub(
+            ('Convert Archives…', 'win.convert'),
+            None,
+            ('Benchmark…', 'win.benchmark'),
+            None,
+            ('Settings…', 'win.settings'),
+        ))
+
+        menu_bar.append_submenu('Favorites', sub(
+            ('Add to Favorites', 'win.add_fav'),
+            ('Organize Favorites…', 'win.org_fav'),
+        ))
+
+        menu_bar.append_submenu('Options', sub(
+            ('Settings…', 'win.settings'),
+        ))
+
+        menu_bar.append_submenu('Help', sub(
+            ('Help Topics', 'win.help_topics'),
+            None,
+            ('About PyZip…', 'win.about'),
+        ))
+
+        popover = Gtk.PopoverMenuBar.new_from_model(menu_bar)
+        parent.append(popover)
 
     def _setup_headerbar(self):
         header = Gtk.HeaderBar()
@@ -775,7 +879,7 @@ class MainWindow(Gtk.ApplicationWindow):
         fz = Gtk.FileFilter()
         fz.set_name('Archives')
         for pat in ['*.zip', '*.tar', '*.tar.gz', '*.tgz',
-                     '*.tar.bz2', '*.tbz2', '*.tar.xz', '*.txz']:
+                     '*.tar.bz2', '*.tbz2', '*.tar.xz', '*.txz', '*.7z']:
             fz.add_pattern(pat)
         fa = Gtk.FileFilter()
         fa.set_name('All files')
